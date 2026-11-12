@@ -45,9 +45,11 @@ below); until then every signal is paper-tracked. The sequence stops as soon as 
    ```
 2. **Telegram API keys**: go to https://my.telegram.org → *API development tools* and copy
    `api_id` and `api_hash` into `TG_API_ID` / `TG_API_HASH`.
-3. **Deriv token**: go to https://app.deriv.com/account/api-token and create a token with
-   the **Read** and **Trade** scopes. **Start with your demo account** (login ID `VRTC…`).
-   Put the token in `DERIV_TOKEN`.
+3. **Deriv access**: Deriv retired its old API (`ws.derivws.com`) in 2026, so the bot uses
+   the new Options API at `api.derivws.com`. At https://developers.deriv.com, register an app to
+   get an **App ID**, and create a **Personal Access Token** with trading permission. Put them in
+   `DERIV_APP_ID` and `DERIV_TOKEN`. Then run `python -m signalbot.main --list-accounts` and copy
+   your **demo** account's ID into `DERIV_ACCOUNT_ID`.
 4. *(Optional)* Create a bot with @BotFather, put its token in `BOT_TOKEN`, then send `/start`
    to your bot once so it is allowed to message you.
 5. Find the signal group's ID:
@@ -92,6 +94,14 @@ bot focuses on one question: *do these signals actually win?*
 How sure you can be depends on how many signals have been measured. A true 60% win rate looks like
 39–78% after 20 signals, 46–72% after 50, 50–69% after 100 and 53–67% after 200. Judge the group
 on **100+ signals**, not on a good week.
+
+## Strategy backtest
+
+```bash
+python -m signalbot.backtest --days 90
+```
+Downloads 1-minute prices from Deriv's public feed (no token needed) and tests about 50
+strategies per market with a walk-forward split and a luck-corrected significance test.
 
 ## Tests
 

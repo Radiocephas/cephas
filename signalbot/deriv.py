@@ -1,4 +1,4 @@
-"""Minimal async client for the Deriv WebSocket API (https://api.deriv.com)."""
+"""Minimal async client for Deriv's Options API (https://developers.deriv.com)."""
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +8,8 @@ import logging
 import os
 import re
 import ssl
+import urllib.error
+import urllib.request
 
 import websockets
 
@@ -66,19 +68,87 @@ class DerivError(Exception):
     pass
 
 
+# reply msg_type -> request name, where they differ
+_REPLY_TYPES = {"history": "ticks_history", "candles": "ticks_history"}
+
+API_BASE = "https://api.derivws.com/trading/v1/options"
+PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
+
+
+def _rest(method: str, url: str, token: str, app_id: str | None) -> dict:
+    """Small blocking REST helper for Deriv's Options API (run it in a thread)."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if app_id:
+        headers["Deriv-App-ID"] = app_id
+    req = urllib.request.Request(url, method=method, headers=headers,
+                                 data=b"{}" if method == "POST" else None)
+    if method == "POST":
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, context=_ssl_context(), timeout=30) as resp:
+            return json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")[:300]
+        raise DerivError(f"{method} {url} -> HTTP {exc.code}: {body}") from None
+
+
+def _find_ws_url(obj) -> str | None:
+    """The OTP response holds a ready-made wss:// URL somewhere; find it."""
+    if isinstance(obj, str) and obj.startswith("wss://"):
+        return obj
+    if isinstance(obj, dict):
+        obj = list(obj.values())
+    if isinstance(obj, list):
+        for v in obj:
+            found = _find_ws_url(v)
+            if found:
+                return found
+    return None
+
+
+async def list_accounts(token: str, app_id: str | None) -> dict:
+    return await asyncio.to_thread(_rest, "GET", f"{API_BASE}/accounts", token, app_id)
+
+
 class DerivClient:
-    def __init__(self, token: str | None, app_id: str = "1089",
-                 url: str = "wss://ws.derivws.com/websockets/v3"):
+    """Deriv Options API client.
+
+    * No token: connects to the public, read-only channel (prices, history).
+    * With a Personal Access Token + App ID + account ID: gets a one-time password over REST
+      and connects to that account's trading channel. Each reconnect fetches a fresh OTP.
+    """
+
+    def __init__(self, token: str | None = None, app_id: str | None = None,
+                 account_id: str | None = None, public_url: str = PUBLIC_WS):
         self._token = token
-        self._url = f"{url}?app_id={app_id}"
+        self._app_id = app_id
+        self._account_id = account_id
+        self._public_url = public_url
         self._ws = None
         self._req_ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
+        self._types: dict[int, str] = {}
         self._reader: asyncio.Task | None = None
         self._keepalive: asyncio.Task | None = None
         self._connect_lock = asyncio.Lock()
         self.symbols: dict[str, str] = dict(STATIC_SYMBOLS)
         self.account: dict = {}
+
+    async def _ws_url(self) -> str:
+        if not self._token:
+            return self._public_url + (f"?app_id={self._app_id}" if self._app_id else "")
+        if not self._account_id:
+            raise DerivError("DERIV_ACCOUNT_ID is not set – run `python -m signalbot.main --list-accounts`")
+        otp = await asyncio.to_thread(_rest, "POST", f"{API_BASE}/accounts/{self._account_id}/otp",
+                                      self._token, self._app_id)
+        url = _find_ws_url(otp)
+        if not url:
+            raise DerivError(f"No WebSocket URL in OTP response: {str(otp)[:300]}")
+        return url
+
+    @property
+    def is_demo(self) -> bool:
+        return "/ws/demo" in getattr(self, "_last_url", "")
 
     # ------------------------------------------------------------------ connection
     async def connect(self) -> None:
@@ -86,17 +156,23 @@ class DerivClient:
             if self._ws is not None and self._reader and not self._reader.done():
                 return
             log.info("Connecting to Deriv…")
-            self._ws = await websockets.connect(self._url, ssl=_ssl_context(), ping_interval=20,
+            url = await self._ws_url()
+            self._last_url = url.split("?")[0]
+            self._ws = await websockets.connect(url, ssl=_ssl_context(), ping_interval=20,
                                                 ping_timeout=20)
             self._reader = asyncio.create_task(self._read_loop())
             if self._keepalive is None or self._keepalive.done():
                 self._keepalive = asyncio.create_task(self._keepalive_loop())
-        if self._token:   # public data (prices, history) needs no token
-            auth = await self.request({"authorize": self._token})
-            self.account = auth["authorize"]
-            log.info("Authorized as %s (%s) balance %s %s", self.account.get("loginid"),
-                     "DEMO" if self.account.get("is_virtual") else "REAL",
-                     self.account.get("balance"), self.account.get("currency"))
+        if self._token:
+            self.account = {"loginid": self._account_id, "is_virtual": self.is_demo}
+            try:
+                bal = (await self.request({"balance": 1}))["balance"]
+                self.account.update(balance=bal.get("balance"), currency=bal.get("currency"))
+            except (DerivError, KeyError) as exc:
+                log.warning("Could not read balance: %s", exc)
+            log.info("Connected to account %s (%s) balance %s %s", self._account_id,
+                     "DEMO" if self.is_demo else "REAL", self.account.get("balance"),
+                     self.account.get("currency"))
         await self._load_symbols()
 
     async def close(self) -> None:
@@ -110,7 +186,15 @@ class DerivClient:
         try:
             async for raw in self._ws:
                 msg = json.loads(raw)
-                fut = self._pending.pop(msg.get("req_id"), None)
+                rid = msg.get("req_id")
+                if rid is None:   # fall back to the oldest pending request of the same type
+                    mtype = msg.get("msg_type") or next(iter(msg), None)
+                    mtype = _REPLY_TYPES.get(mtype, mtype)
+                    rid = next((k for k, t in self._types.items() if t == mtype), None)
+                    if rid is None and len(self._pending) == 1:
+                        rid = next(iter(self._pending))
+                fut = self._pending.pop(rid, None)
+                self._types.pop(rid, None)
                 if fut and not fut.done():
                     fut.set_result(msg)
         except websockets.ConnectionClosed as exc:
@@ -135,6 +219,7 @@ class DerivClient:
         req_id = next(self._req_ids)
         fut = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
+        self._types[req_id] = next(iter(payload))
         try:
             await self._ws.send(json.dumps({**payload, "req_id": req_id}))
             msg = await asyncio.wait_for(fut, timeout)
@@ -147,6 +232,7 @@ class DerivClient:
             raise
         finally:
             self._pending.pop(req_id, None)
+            self._types.pop(req_id, None)
         if "error" in msg:
             raise DerivError(f"{msg['error'].get('code')}: {msg['error'].get('message')}")
         return msg

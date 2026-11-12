@@ -2,6 +2,7 @@
 
     python -m signalbot.main              # run the bot
     python -m signalbot.main --list-chats # print your chats and their IDs
+    python -m signalbot.main --list-accounts  # print your Deriv accounts and their IDs
     python -m signalbot.main --backfill 2000  # score the group's past signals
 """
 from __future__ import annotations
@@ -13,7 +14,7 @@ import logging
 from telethon import TelegramClient, events
 
 from .config import Config
-from .deriv import DerivClient
+from .deriv import DerivClient, list_accounts
 from .parser import parse_signal
 from .stats import format_report, load_journal
 from .trader import Trader
@@ -48,7 +49,7 @@ async def backfill(cfg: Config, limit: int) -> None:
 
     journal = load_journal()
     seen = {(r["entry"], r["market"], r["direction"]) for r in journal}
-    deriv = DerivClient(cfg.deriv_token, cfg.deriv_app_id, cfg.deriv_ws_url)
+    deriv = DerivClient(cfg.deriv_token, cfg.deriv_app_id, cfg.deriv_account_id)
     await deriv.connect()
     added = 0
     async with TelegramClient(cfg.tg_session, cfg.tg_api_id, cfg.tg_api_hash) as user:
@@ -91,7 +92,7 @@ async def run(cfg: Config) -> None:
         except Exception as exc:
             log.warning("Notification failed: %s", exc)
 
-    deriv = DerivClient(cfg.deriv_token, cfg.deriv_app_id, cfg.deriv_ws_url)
+    deriv = DerivClient(cfg.deriv_token, cfg.deriv_app_id, cfg.deriv_account_id)
     await deriv.connect()
     trader = Trader(cfg, deriv, notify)
 
@@ -179,11 +180,16 @@ def main() -> None:
                         handlers=[logging.StreamHandler(), logging.FileHandler("trades.log")])
     ap = argparse.ArgumentParser()
     ap.add_argument("--list-chats", action="store_true", help="print your Telegram chats and IDs")
+    ap.add_argument("--list-accounts", action="store_true", help="print your Deriv Options accounts")
     ap.add_argument("--backfill", type=int, metavar="N",
                     help="score the last N messages of the signal group against price history")
     args = ap.parse_args()
     cfg = Config.load()
-    if args.list_chats:
+    if args.list_accounts:
+        import json
+        print(json.dumps(asyncio.run(list_accounts(cfg.deriv_token, cfg.deriv_app_id)), indent=2))
+        print("\nPut the ID of the account to trade (use a DEMO one first) in DERIV_ACCOUNT_ID.")
+    elif args.list_chats:
         asyncio.run(list_chats(cfg))
     elif args.backfill:
         asyncio.run(backfill(cfg, args.backfill))

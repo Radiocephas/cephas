@@ -33,7 +33,7 @@ class Config:
     # Deriv
     deriv_token: str
     deriv_app_id: str
-    deriv_ws_url: str
+    deriv_account_id: str | None
     currency: str
     # Money management
     base_stake: float
@@ -65,8 +65,8 @@ class Config:
             bot_token=_get("BOT_TOKEN"),
             owner_id=int(owner) if owner else None,
             deriv_token=_get("DERIV_TOKEN", required=True),
-            deriv_app_id=_get("DERIV_APP_ID", "1089"),
-            deriv_ws_url=_get("DERIV_WS_URL", "wss://ws.derivws.com/websockets/v3"),
+            deriv_app_id=_get("DERIV_APP_ID", required=True),
+            deriv_account_id=_get("DERIV_ACCOUNT_ID"),
             currency=_get("CURRENCY", "USD"),
             base_stake=float(_get("BASE_STAKE", "1")),
             martingale_multiplier=float(_get("MARTINGALE_MULTIPLIER", "2.2")),

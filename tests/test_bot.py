@@ -220,3 +220,44 @@ def test_backtest_detects_a_real_edge():
     res = evaluate_symbol("PLANTED", _walk(60_000, 2, revert=0.05), 0.95, build_strategies())
     text = report(res, 42)
     assert "passed the luck-corrected test" in text and "None passed" not in text
+
+
+def test_find_ws_url_in_otp_response():
+    from signalbot.deriv import _find_ws_url
+    resp = {"data": {"otp": "abc", "url": "wss://api.derivws.com/trading/v1/options/ws/demo?otp=abc"}}
+    assert _find_ws_url(resp).endswith("ws/demo?otp=abc")
+    assert _find_ws_url({"data": {"otp": "abc"}}) is None
+
+
+def test_client_matches_replies_with_and_without_req_id():
+    import json as _json
+    import websockets
+    from signalbot.deriv import DerivClient
+
+    async def handler(ws):
+        async for raw in ws:
+            msg = _json.loads(raw)
+            if "active_symbols" in msg:
+                await ws.send(_json.dumps({"msg_type": "active_symbols", "req_id": msg["req_id"],
+                                           "active_symbols": [{"symbol": "R_75", "display_name": "Volatility 75 Index"}]}))
+            elif "ticks_history" in msg:   # reply WITHOUT req_id
+                await ws.send(_json.dumps({"msg_type": "history",
+                                           "history": {"times": [1, 2], "prices": ["1.5", "2.5"]}}))
+
+    async def go():
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            c = DerivClient(public_url=f"ws://127.0.0.1:{port}")
+            import signalbot.deriv as d
+            orig = d.websockets.connect
+            d.websockets.connect = lambda url, ssl=None, **kw: orig(url, **kw)   # plain ws for the test
+            try:
+                await c.connect()
+                assert c.resolve_symbol("Volatility 75 Index") == "R_75"
+                ticks = await asyncio.wait_for(c.ticks_between("R_75", 0, 10), 5)
+            finally:
+                d.websockets.connect = orig
+                await c.close()
+            return ticks
+
+    assert asyncio.run(go()) == [(1, 1.5), (2, 2.5)]

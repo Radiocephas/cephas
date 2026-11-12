@@ -243,7 +243,7 @@ def report(results: list[Result], days: int) -> str:
 
 # ----------------------------------------------------------------------------- data
 async def fetch(symbols: list[str], days: int, cache_dir: str) -> tuple[dict[str, np.ndarray], dict[str, float]]:
-    deriv = DerivClient(None)
+    deriv = DerivClient(None, os.getenv("DERIV_APP_ID") or None)
     await deriv.connect()
     available = set(deriv.symbols.values())
     end = int(time.time()) // 60 * 60
