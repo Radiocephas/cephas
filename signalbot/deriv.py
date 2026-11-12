@@ -54,7 +54,8 @@ class DerivError(Exception):
 
 
 class DerivClient:
-    def __init__(self, token: str, app_id: str, url: str):
+    def __init__(self, token: str | None, app_id: str = "1089",
+                 url: str = "wss://ws.derivws.com/websockets/v3"):
         self._token = token
         self._url = f"{url}?app_id={app_id}"
         self._ws = None
@@ -76,11 +77,12 @@ class DerivClient:
             self._reader = asyncio.create_task(self._read_loop())
             if self._keepalive is None or self._keepalive.done():
                 self._keepalive = asyncio.create_task(self._keepalive_loop())
-        auth = await self.request({"authorize": self._token})
-        self.account = auth["authorize"]
-        log.info("Authorized as %s (%s) balance %s %s", self.account.get("loginid"),
-                 "DEMO" if self.account.get("is_virtual") else "REAL",
-                 self.account.get("balance"), self.account.get("currency"))
+        if self._token:   # public data (prices, history) needs no token
+            auth = await self.request({"authorize": self._token})
+            self.account = auth["authorize"]
+            log.info("Authorized as %s (%s) balance %s %s", self.account.get("loginid"),
+                     "DEMO" if self.account.get("is_virtual") else "REAL",
+                     self.account.get("balance"), self.account.get("currency"))
         await self._load_symbols()
 
     async def close(self) -> None:
@@ -173,6 +175,26 @@ class DerivClient:
             },
         })
         return resp["buy"]
+
+    async def candles(self, symbol: str, start: int, end: int, granularity: int = 60) -> list[dict]:
+        """All candles between start and end (epochs), fetched in pages of 5000."""
+        out: dict[int, dict] = {}
+        cursor = end
+        while cursor > start:
+            page_start = max(start, cursor - 5000 * granularity)
+            resp = await self.request({"ticks_history": symbol, "style": "candles",
+                                       "granularity": granularity, "start": page_start,
+                                       "end": cursor, "count": 5000, "adjust_start_time": 0}, timeout=60)
+            page = resp.get("candles", [])
+            if not page:
+                break
+            for c in page:
+                out[int(c["epoch"])] = c
+            earliest = min(int(c["epoch"]) for c in page)
+            if earliest > page_start + 10 * granularity:
+                break   # history doesn't go back any further
+            cursor = page_start
+        return [out[k] for k in sorted(out)]
 
     async def ticks_between(self, symbol: str, start: int, end: int) -> list[tuple[int, float]]:
         """Return (epoch, price) ticks with start <= epoch <= end."""

@@ -197,3 +197,26 @@ def test_edge_gate_blocks_until_proven(tmp_path):
         for i in range(100):
             fh.write(json.dumps({"candles": [i % 5 != 0], "payout": 0.95}) + "\n")  # 80% win rate
     assert trader.edge_gate_reason() is None
+
+
+def _walk(n, seed, revert=0.0):
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    x = np.zeros(n)
+    for i in range(1, n):
+        x[i] = x[i - 1] * (1 - revert) + rng.normal()
+    return 1000 + x
+
+
+def test_backtest_finds_nothing_in_random_walk():
+    from signalbot.backtest import build_strategies, evaluate_symbol, report
+    res = evaluate_symbol("RANDOM", _walk(60_000, 1), 0.95, build_strategies())
+    assert "None passed the luck-corrected test" in report(res, 42)
+
+
+def test_backtest_detects_a_real_edge():
+    # strongly mean-reverting series: "reversal"/"revert" strategies genuinely win
+    from signalbot.backtest import build_strategies, evaluate_symbol, report
+    res = evaluate_symbol("PLANTED", _walk(60_000, 2, revert=0.05), 0.95, build_strategies())
+    text = report(res, 42)
+    assert "passed the luck-corrected test" in text and "None passed" not in text
