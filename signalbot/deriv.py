@@ -5,7 +5,9 @@ import asyncio
 import itertools
 import json
 import logging
+import os
 import re
+import ssl
 
 import websockets
 
@@ -49,6 +51,17 @@ def normalize_market(name: str) -> str:
     return name
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Use certifi's certificates so macOS python.org installs work without extra setup."""
+    if os.getenv("SSL_CERT_FILE"):
+        return ssl.create_default_context()
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 class DerivError(Exception):
     pass
 
@@ -73,7 +86,8 @@ class DerivClient:
             if self._ws is not None and self._reader and not self._reader.done():
                 return
             log.info("Connecting to Deriv…")
-            self._ws = await websockets.connect(self._url, ping_interval=20, ping_timeout=20)
+            self._ws = await websockets.connect(self._url, ssl=_ssl_context(), ping_interval=20,
+                                                ping_timeout=20)
             self._reader = asyncio.create_task(self._read_loop())
             if self._keepalive is None or self._keepalive.done():
                 self._keepalive = asyncio.create_task(self._keepalive_loop())
