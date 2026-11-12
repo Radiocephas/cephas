@@ -140,6 +140,7 @@ class DerivClient:
         self._connect_lock = asyncio.Lock()
         self.symbols: dict[str, str] = dict(STATIC_SYMBOLS)
         self.account: dict = {}
+        self.history_pause = 1.0   # seconds between large history requests
 
     async def _ws_url(self) -> str:
         if not self._token:
@@ -288,21 +289,39 @@ class DerivClient:
         })
         return resp["buy"]
 
+    async def _history_request(self, payload: dict, attempts: int = 12) -> dict:
+        """Large history requests are rate-limited by Deriv: pace them and back off when told to."""
+        delay = 30
+        for attempt in range(attempts):
+            await asyncio.sleep(self.history_pause)
+            try:
+                return await self.request(payload, timeout=60)
+            except DerivError as exc:
+                if "RateLimit" not in str(exc) or attempt == attempts - 1:
+                    raise
+                log.info("Deriv rate limit reached – waiting %ds before continuing…", delay)
+                await asyncio.sleep(delay)
+                self.history_pause = min(self.history_pause * 2, 20)   # go slower from now on
+                delay = min(delay * 2, 300)
+        raise DerivError("unreachable")
+
     async def candles(self, symbol: str, start: int, end: int, granularity: int = 60) -> list[dict]:
         """All candles between start and end (epochs), fetched in pages of 5000."""
         out: dict[int, dict] = {}
         cursor = end
         while cursor > start:
             page_start = max(start, cursor - 5000 * granularity)
-            resp = await self.request({"ticks_history": symbol, "style": "candles",
-                                       "granularity": granularity, "start": page_start,
-                                       "end": cursor, "count": 5000}, timeout=60)
+            resp = await self._history_request({"ticks_history": symbol, "style": "candles",
+                                                "granularity": granularity, "start": page_start,
+                                                "end": cursor, "count": 5000})
             page = resp.get("candles", [])
             if not page:
                 break
             for c in page:
                 c["epoch"] = int(_first(c, "epoch", "open_time", "time"))
                 out[c["epoch"]] = c
+            log.info("  %s: %d%% downloaded", symbol,
+                     min(100, int(100 * (end - min(out)) / max(1, end - start))))
             earliest = min(c["epoch"] for c in page)
             if earliest >= cursor or (earliest > page_start and len(page) < 10):
                 break   # no older data

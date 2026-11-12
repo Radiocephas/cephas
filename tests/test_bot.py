@@ -273,7 +273,28 @@ def test_candles_pagination_with_capped_pages():
             epochs = list(range(lo - lo % 60, hi + 1, 60))[-1000:]   # server caps at 1000
             return {"candles": [{"epoch": e, "close": e / 60} for e in epochs if e >= lo]}
 
-    got = asyncio.run(Capped().candles("R_75", 0, 600_000))
+    client = Capped()
+    client.history_pause = 0
+    got = asyncio.run(client.candles("R_75", 0, 600_000))
     epochs = [c["epoch"] for c in got]
     assert epochs == sorted(set(epochs)) and epochs[0] == 6000 and epochs[-1] == 600_000
     assert len(epochs) == (600_000 - 6000) // 60 + 1
+
+
+def test_history_backs_off_on_rate_limit(monkeypatch):
+    from signalbot.deriv import DerivClient, DerivError
+    calls = []
+
+    class Limited(DerivClient):
+        async def request(self, payload, timeout=30, _retry=True):
+            calls.append(1)
+            if len(calls) < 3:
+                raise DerivError("RateLimit: You have reached the rate limit for ticks_history_expensive.")
+            return {"candles": [{"epoch": 60, "close": 1.0}]}
+
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    c = Limited()
+    assert asyncio.run(c._history_request({"ticks_history": "R_75"}))["candles"]
+    assert len(calls) == 3 and c.history_pause > 1
