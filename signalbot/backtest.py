@@ -124,24 +124,47 @@ def norm_sf(x: float) -> float:
     return 0.5 * (1 - erf(x / sqrt(2)))
 
 
+Payouts = tuple[float, float]   # profit per 1 staked for (Rise, Fall)
+
+
+def breakeven(payout: float) -> float:
+    return 1 / (1 + payout)
+
+
 @dataclass
 class Score:
     trades: int
     wins: int
+    up_trades: int = 0
+    up_wins: int = 0
 
     @property
     def win_rate(self) -> float:
         return self.wins / self.trades if self.trades else 0.0
 
-    def profit(self, payout: float) -> float:   # in stake units
-        return self.wins * payout - (self.trades - self.wins)
+    def __add__(self, o: "Score") -> "Score":
+        return Score(self.trades + o.trades, self.wins + o.wins,
+                     self.up_trades + o.up_trades, self.up_wins + o.up_wins)
 
-    def p_value(self, breakeven: float) -> float:
-        """Chance of doing at least this well with no edge at all."""
+    def _sides(self, pay: Payouts):
+        dn_t, dn_w = self.trades - self.up_trades, self.wins - self.up_wins
+        return ((self.up_trades, self.up_wins, pay[0]), (dn_t, dn_w, pay[1]))
+
+    def profit(self, pay: Payouts) -> float:   # in stake units
+        return sum(w * p - (t - w) for t, w, p in self._sides(pay))
+
+    def breakeven(self, pay: Payouts) -> float:
+        """Win rate needed to break even, given how many Rise vs Fall trades were taken."""
         if not self.trades:
+            return breakeven(pay[0])
+        return sum(t * breakeven(p) for t, _, p in self._sides(pay)) / self.trades
+
+    def p_value(self, pay: Payouts) -> float:
+        """Chance of making at least this profit with no edge at all (win rate = break-even)."""
+        var = sum(t * (breakeven(p) * p * p + (1 - breakeven(p))) for t, _, p in self._sides(pay))
+        if var <= 0:
             return 1.0
-        sd = sqrt(breakeven * (1 - breakeven) / self.trades)
-        return norm_sf((self.win_rate - breakeven) / sd)
+        return norm_sf(self.profit(pay) / sqrt(var))
 
 
 def score(direction: np.ndarray, closes: np.ndarray, lo: int, hi: int) -> Score:
@@ -150,27 +173,34 @@ def score(direction: np.ndarray, closes: np.ndarray, lo: int, hi: int) -> Score:
     d = np.nan_to_num(direction[idx]).astype(int)
     move = np.sign(closes[idx + HORIZON] - closes[idx])
     taken = d != 0
-    wins = int(np.sum((d == move) & taken & (move != 0)))   # ties lose, as on Deriv
-    return Score(int(taken.sum()), wins)
+    won = (d == move) & taken & (move != 0)   # ties lose, as on Deriv
+    up = d == 1
+    return Score(int(taken.sum()), int(won.sum()), int(up.sum()), int((won & up).sum()))
 
 
 @dataclass
 class Result:
     symbol: str
     strategy: str
-    payout: float
+    payouts: Payouts
     train: Score
     test: Score
 
+    def edge(self, part: Score) -> float:   # profit per trade, in stakes
+        return part.profit(self.payouts) / part.trades if part.trades else -1.0
 
-def evaluate_symbol(symbol: str, closes: np.ndarray, payout: float,
+
+def evaluate_symbol(symbol: str, closes: np.ndarray, payouts: Payouts | float,
                     strategies: dict[str, Strategy]) -> list[Result]:
+    if isinstance(payouts, (int, float)):
+        payouts = (float(payouts), float(payouts))
     f = features(closes)
     split = int(len(closes) * SPLIT)
     out = []
     for name, strat in strategies.items():
         d = strat(f)
-        out.append(Result(symbol, name, payout, score(d, closes, 0, split), score(d, closes, split, len(closes))))
+        out.append(Result(symbol, name, payouts, score(d, closes, 0, split),
+                          score(d, closes, split, len(closes))))
     return out
 
 
@@ -180,69 +210,67 @@ def report(results: list[Result], days: int) -> str:
              "",
              f"{len({r.symbol for r in results})} markets × {len({r.strategy for r in results})} strategies "
              f"= {n_tests} combinations. Chosen on the first {SPLIT:.0%} of the data, "
-             f"tested on the last {1 - SPLIT:.0%}.",
+             f"tested on the last {1 - SPLIT:.0%}. Rise and Fall are priced with their own payouts.",
              ""]
 
-    # 1. what a trader would do: pick the best-looking strategy per market, then trade it
+    # 1. what a trader would do: pick the most profitable-looking strategy per market, then trade it
     lines += ["## Best strategy per market (picked on past data, then tested on new data)", "",
-              "| Market | Payout | Break-even | Picked strategy | Win rate when picked | Win rate on new data | New-data trades | Profit per 100 trades |",
+              "| Market | Payout Rise / Fall | Picked strategy | Win rate when picked | Win rate on new data | Break-even | New-data trades | Profit per 100 trades |",
               "|---|---|---|---|---|---|---|---|"]
-    total_test = Score(0, 0)
+    total = Score(0, 0)
     total_profit = 0.0
     for sym in sorted({r.symbol for r in results}):
         rs = [r for r in results if r.symbol == sym and r.train.trades >= MIN_TRADES]
         if not rs:
             continue
-        best = max(rs, key=lambda r: r.train.win_rate)
-        be = 1 / (1 + best.payout)
-        per100 = best.test.profit(best.payout) / best.test.trades * 100 if best.test.trades else 0
-        total_test = Score(total_test.trades + best.test.trades, total_test.wins + best.test.wins)
-        total_profit += best.test.profit(best.payout)
-        lines.append(f"| {sym} | {best.payout:.1%} | {be:.1%} | {best.strategy} | {best.train.win_rate:.1%} "
-                     f"| **{best.test.win_rate:.1%}** | {best.test.trades} | {per100:+.1f} stakes |")
-    lines += ["", f"All picked strategies together on new data: **{total_test.win_rate:.2%}** win rate over "
-              f"{total_test.trades} trades, profit **{total_profit:+.1f} stakes**.", ""]
+        best = max(rs, key=lambda r: r.edge(r.train))
+        pay = best.payouts
+        total = total + best.test
+        total_profit += best.test.profit(pay)
+        lines.append(f"| {sym} | {pay[0]:.1%} / {pay[1]:.1%} | {best.strategy} | {best.train.win_rate:.1%} "
+                     f"| **{best.test.win_rate:.1%}** | {best.test.breakeven(pay):.1%} | {best.test.trades} "
+                     f"| {best.edge(best.test) * 100:+.1f} stakes |")
+    lines += ["", f"All picked strategies together on new data: **{total.win_rate:.2%}** win rate over "
+              f"{total.trades} trades, profit **{total_profit:+.1f} stakes**.", ""]
 
-    # 2. anything that beats break-even on new data after correcting for luck
-    lines += ["## Strategies that beat break-even on new data", ""]
-    sig = []
-    for r in results:
-        be = 1 / (1 + r.payout)
-        if r.test.trades >= MIN_TRADES // 2 and r.test.win_rate > be:
-            p = r.test.p_value(be)
-            sig.append((p, r))
-    sig.sort(key=lambda x: x[0])
+    # 2. anything profitable on new data, after correcting for luck
+    lines += ["## Strategies that were profitable on new data", ""]
+    sig = sorted(((r.test.p_value(r.payouts), r) for r in results
+                  if r.test.trades >= MIN_TRADES // 2 and r.edge(r.test) > 0), key=lambda x: x[0])
     alpha = 0.05 / n_tests
-    real = [(p, r) for p, r in sig if p < alpha and r.train.win_rate > 1 / (1 + r.payout)]
-    lines.append(f"{len(sig)} of {n_tests} combinations were above break-even on new data. With no edge at all, "
-                 f"about half the near-50% strategies land above or below by chance, so this alone means nothing.")
+    real = [(p, r) for p, r in sig if p < alpha and r.edge(r.train) > 0]
+    lines.append(f"{len(sig)} of {n_tests} combinations made a profit on new data. With no edge at all, "
+                 "roughly a fifth to half land in profit by chance, so this alone means nothing.")
     lines.append("")
     if real:
-        lines.append(f"**{len(real)} passed the luck-corrected test** (p < {alpha:.1e}, and above break-even "
-                     "on BOTH halves):")
+        lines.append(f"**{len(real)} passed the luck-corrected test** (p < {alpha:.1e}, and profitable on "
+                     "BOTH halves):")
         lines.append("")
         for p, r in real:
-            lines.append(f"- {r.symbol} – {r.strategy}: picked {r.train.win_rate:.1%} ({r.train.trades}), "
-                         f"new data {r.test.win_rate:.1%} ({r.test.trades}), p={p:.1e}")
+            lines.append(f"- {r.symbol} – {r.strategy}: picked {r.edge(r.train) * 100:+.1f}/100 "
+                         f"({r.train.trades}), new data {r.edge(r.test) * 100:+.1f}/100 ({r.test.trades}), p={p:.1e}")
     else:
         lines.append("**None passed the luck-corrected test.** No strategy showed an edge that could not be "
                      "explained by chance.")
     lines += ["", "Top 10 on new data (for reference; most are expected to be luck):", ""]
     for p, r in sig[:10]:
-        lines.append(f"- {r.symbol} – {r.strategy}: picked {r.train.win_rate:.1%}, new data "
-                     f"{r.test.win_rate:.1%} ({r.test.trades} trades), p={p:.3f}")
+        lines.append(f"- {r.symbol} – {r.strategy}: win rate {r.test.win_rate:.1%} vs break-even "
+                     f"{r.test.breakeven(r.payouts):.1%} ({r.test.trades} trades), "
+                     f"{r.edge(r.test) * 100:+.1f} stakes/100, p={p:.3f}")
 
     # 3. overall distribution
+    edges = [r.edge(r.test) * 100 for r in results if r.test.trades >= MIN_TRADES // 2]
     rates = [r.test.win_rate for r in results if r.test.trades >= MIN_TRADES // 2]
     if rates:
         lines += ["", "## All strategies on new data", "",
-                  f"Average win rate {np.mean(rates):.2%}, median {np.median(rates):.2%}, "
-                  f"range {min(rates):.1%}–{max(rates):.1%}."]
+                  f"Average win rate {np.mean(rates):.2%}, median {np.median(rates):.2%}. "
+                  f"Average profit {np.mean(edges):+.1f} stakes per 100 trades "
+                  f"(range {min(edges):+.1f} to {max(edges):+.1f})."]
     return "\n".join(lines)
 
 
 # ----------------------------------------------------------------------------- data
-async def fetch(symbols: list[str], days: int, cache_dir: str) -> tuple[dict[str, np.ndarray], dict[str, float]]:
+async def fetch(symbols: list[str], days: int, cache_dir: str) -> tuple[dict[str, np.ndarray], dict[str, Payouts]]:
     deriv = DerivClient(None, os.getenv("DERIV_APP_ID") or None)
     await deriv.connect()
     available = set(deriv.symbols.values())
@@ -266,12 +294,16 @@ async def fetch(symbols: list[str], days: int, cache_dir: str) -> tuple[dict[str
             data[sym] = np.array([float(c.get("close", c.get("c"))) for c in candles])
             np.save(path, data[sym])
         log.info("%s: %d minutes of data", sym, len(data[sym]))
-        try:
-            payouts[sym] = await deriv.payout_rate(symbol=sym, contract_type="CALL", duration=HORIZON,
-                                                   duration_unit="m", currency="USD")
-        except Exception as exc:
-            log.warning("No payout quote for %s (%s); assuming 95%%", sym, exc)
-            payouts[sym] = 0.95
+        pay = []
+        for ct in ("CALL", "PUT"):
+            try:
+                pay.append(await deriv.payout_rate(symbol=sym, contract_type=ct, duration=HORIZON,
+                                                   duration_unit="m", currency="USD"))
+            except Exception as exc:
+                log.warning("No %s payout quote for %s (%s); assuming 95%%", ct, sym, exc)
+                pay.append(0.95)
+        payouts[sym] = (pay[0], pay[1])
+        log.info("%s payouts: Rise %.1f%%, Fall %.1f%%", sym, pay[0] * 100, pay[1] * 100)
     await deriv.close()
     return data, payouts
 

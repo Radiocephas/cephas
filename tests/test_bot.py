@@ -298,3 +298,24 @@ def test_history_backs_off_on_rate_limit(monkeypatch):
     c = Limited()
     assert asyncio.run(c._history_request({"ticks_history": "R_75"}))["candles"]
     assert len(calls) == 3 and c.history_pause > 1
+
+
+def test_backtest_uses_direction_specific_payouts():
+    from signalbot.backtest import Score
+    s = Score(trades=100, wins=52, up_trades=0, up_wins=0)        # 100 Fall trades, 52 won
+    pay = (1.019, 0.88)                                            # Bear-market style pricing
+    assert round(s.breakeven(pay), 3) == round(1 / 1.88, 3)        # 53.2%, not 49.5%
+    assert s.profit(pay) < 0                                       # 52% Fall loses at 88% payout
+    assert s.p_value(pay) > 0.5
+
+
+def test_drift_priced_into_payout_is_not_an_edge():
+    # a falling market where Fall pays less, priced fairly: "always fall" must not pass
+    import numpy as np
+    from signalbot.backtest import build_strategies, evaluate_symbol, report
+    rng = np.random.default_rng(5)
+    closes = 1000 + np.cumsum(rng.normal(-0.03, 1, 60_000))
+    up = np.mean(closes[5::5] > closes[:-5:5])
+    fair = (1 / up - 1, 1 / (1 - up) - 1)
+    text = report(evaluate_symbol("BEARISH", closes, fair, build_strategies()), 42)
+    assert "None passed the luck-corrected test" in text
