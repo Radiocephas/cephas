@@ -167,6 +167,23 @@ class DerivClient:
         })
         return resp["buy"]
 
+    async def ticks_between(self, symbol: str, start: int, end: int) -> list[tuple[int, float]]:
+        """Return (epoch, price) ticks with start <= epoch <= end."""
+        resp = await self.request({"ticks_history": symbol, "start": start, "end": end,
+                                   "style": "ticks", "count": 5000, "adjust_start_time": 0})
+        hist = resp["history"]
+        return list(zip(hist["times"], map(float, hist["prices"])))
+
+    async def payout_rate(self, *, symbol: str, contract_type: str, duration: int,
+                          duration_unit: str, currency: str) -> float:
+        """Profit per 1 unit staked if the contract wins (e.g. 0.95)."""
+        resp = await self.request({
+            "proposal": 1, "amount": 10, "basis": "stake", "contract_type": contract_type,
+            "currency": currency, "duration": duration, "duration_unit": duration_unit,
+            "symbol": symbol,
+        })
+        return float(resp["proposal"]["payout"]) / 10 - 1
+
     async def wait_for_result(self, contract_id: int, expected_seconds: float) -> dict:
         """Sleep until expiry, then poll until Deriv has settled the contract."""
         await asyncio.sleep(max(0.0, expected_seconds))

@@ -44,6 +44,14 @@ class Config:
     daily_profit_target: float
     late_entry_tolerance: int   # seconds after entry time we still accept a trade
     dry_run: bool
+    # Loss protection
+    stake_percent: float        # >0: base stake = this % of balance (overrides base_stake)
+    max_losing_sequences: int   # stop for the day after this many fully lost signals (0 = off)
+    edge_gate: bool             # only trade real money while the group's measured win rate is good
+    edge_min_signals: int       # signals to track before live trading can start
+    edge_window: int            # judge the group on its most recent N signals
+    edge_margin: float          # required win rate = break-even + this
+    payout_rate: float          # fallback payout if Deriv can't be asked
 
     @classmethod
     def load(cls) -> "Config":
@@ -62,10 +70,17 @@ class Config:
             currency=_get("CURRENCY", "USD"),
             base_stake=float(_get("BASE_STAKE", "1")),
             martingale_multiplier=float(_get("MARTINGALE_MULTIPLIER", "2.2")),
-            max_martingale_steps=int(_get("MAX_MARTINGALE_STEPS", "3")),
+            max_martingale_steps=int(_get("MAX_MARTINGALE_STEPS", "1")),
             max_stake=float(_get("MAX_STAKE", "50")),
             daily_loss_limit=float(_get("DAILY_LOSS_LIMIT", "50")),
             daily_profit_target=float(_get("DAILY_PROFIT_TARGET", "0")),
             late_entry_tolerance=int(_get("LATE_ENTRY_TOLERANCE", "20")),
             dry_run=_bool("DRY_RUN", False),
+            stake_percent=float(_get("STAKE_PERCENT", "0")),
+            max_losing_sequences=int(_get("MAX_LOSING_SEQUENCES", "2")),
+            edge_gate=_bool("EDGE_GATE", True),
+            edge_min_signals=int(_get("EDGE_MIN_SIGNALS", "50")),
+            edge_window=int(_get("EDGE_WINDOW", "100")),
+            edge_margin=float(_get("EDGE_MARGIN", "0.03")),
+            payout_rate=float(_get("PAYOUT_RATE", "0.95")),
         )

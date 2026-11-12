@@ -18,10 +18,11 @@ For this signal the bot will:
 |---|---|
 | 11:30:00 | Buy **Rise** on `1HZ75V`, 5 min, stake = `BASE_STAKE` |
 | 11:35:00 | If lost → Recovery 1, stake × `MARTINGALE_MULTIPLIER` |
-| 11:40:00 | If lost → Recovery 2, stake × multiplier² |
-| 11:45:00 | If lost → Recovery 3 (last), stake × multiplier³ |
+| 11:40:00 | If lost and `MAX_MARTINGALE_STEPS` ≥ 2 → Recovery 2 |
+| 11:45:00 | If lost and `MAX_MARTINGALE_STEPS` = 3 → Recovery 3 |
 
-The sequence stops as soon as a trade wins, or when a limit (`MAX_STAKE`, `DAILY_LOSS_LIMIT`,
+By default it trades **only after the group has proven a winning record** (see *Losing less*
+below); until then every signal is paper-tracked. The sequence stops as soon as a trade wins, or when a limit (`MAX_STAKE`, `DAILY_LOSS_LIMIT`,
 `DAILY_PROFIT_TARGET`, `/pause`) is hit.
 
 ## How it works
@@ -29,7 +30,7 @@ The sequence stops as soon as a trade wins, or when a limit (`MAX_STAKE`, `DAILY
 * **Listener** – a Telethon *user* session logs in as you, so it can read any group you are a
   member of. You don't need to be an admin, and you don't need to add a bot to the group.
 * **Control bot** (optional) – a bot from @BotFather sends you every entry, result and error, and
-  takes commands: `/status`, `/balance`, `/pause`, `/resume`, `/stake 2`. You can also forward
+  takes commands: `/status`, `/report`, `/balance`, `/pause`, `/resume`, `/stake 2`. You can also forward
   or paste a signal to it to trade the signal manually.
 * **Deriv** – trades go straight to Deriv's official WebSocket API using your API token. No
   third-party site gets your token.
@@ -64,6 +65,33 @@ The sequence stops as soon as a trade wins, or when a limit (`MAX_STAKE`, `DAILY
 The bot must be running when the signal arrives. Use a VPS or another machine that is always on,
 for example with `tmux`, `systemd`, or `nohup python -m signalbot.main &`. Your clock must be in
 sync (NTP), because entries are timed to the second.
+
+## Losing less: the edge gate
+
+Rise/Fall on Deriv pays about 95% of the stake, so a signal group must be right **more than about
+51.3%** of the time just to break even. Martingale does not change that: it multiplies your
+expected result in whichever direction it already goes, and it adds rare but large losses. So the
+bot focuses on one question: *do these signals actually win?*
+
+1. **Every signal is scored.** Whether it was traded or not, the bot checks Deriv's tick history
+   after the window closes and records in `journal.jsonl` whether the entry and each recovery
+   candle won.
+2. **Backfill the past.** Measure the group's real record right away instead of waiting weeks:
+   ```bash
+   python -m signalbot.main --backfill 3000
+   ```
+3. **`/report`** shows the measured win rate with its 95% range, the break-even rate, a verdict,
+   and what flat staking and martingale ×1/×2/×3 would have made, with the drawdown for each.
+4. **Edge gate.** Real trades are placed only after `EDGE_MIN_SIGNALS` signals have been tracked
+   **and** the win rate over the last `EDGE_WINDOW` signals is at least break-even +
+   `EDGE_MARGIN`. If the group's form drops, the bot goes back to paper-tracking on its own.
+5. **Limits.** `MAX_LOSING_SEQUENCES` stops the bot after N signals that lose every step in one
+   day. `DAILY_LOSS_LIMIT` and `MAX_STAKE` stay in force. `STAKE_PERCENT` sizes stakes as a % of
+   your balance, so stakes shrink after losses and grow after wins.
+
+How sure you can be depends on how many signals have been measured. A true 60% win rate looks like
+39–78% after 20 signals, 46–72% after 50, 50–69% after 100 and 53–67% after 200. Judge the group
+on **100+ signals**, not on a good week.
 
 ## Tests
 

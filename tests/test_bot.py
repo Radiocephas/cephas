@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 from signalbot.deriv import STATIC_SYMBOLS, normalize_market
 from signalbot.parser import parse_signal
+from signalbot.stats import breakeven, edge, sequence_profit, simulate, wilson_interval
+from signalbot.tracker import candle_outcomes
 from signalbot.trader import Trader, martingale_stake
 
 SIGNAL = """Entry confirmed ✅
@@ -76,12 +78,14 @@ class FakeDeriv:
 def _cfg(**over):
     base = dict(base_stake=1.0, martingale_multiplier=2.2, max_martingale_steps=3, max_stake=50,
                 daily_loss_limit=50, daily_profit_target=0, late_entry_tolerance=20,
-                dry_run=False, currency="USD")
+                dry_run=False, currency="USD", stake_percent=0, max_losing_sequences=0,
+                edge_gate=False, edge_min_signals=50, edge_window=100, edge_margin=0.03,
+                payout_rate=0.95)
     base.update(over)
     return SimpleNamespace(**base)
 
 
-def _run_sequence(losses, **cfg):
+def _run_sequence(losses, trader_setup=None, **cfg):
     deriv = FakeDeriv(losses)
     msgs = []
 
@@ -91,6 +95,8 @@ def _run_sequence(losses, **cfg):
     async def go():
         trader = Trader(_cfg(**cfg), deriv, notify)
         trader._wait_until = lambda when: asyncio.sleep(0, result=True)  # no real waiting
+        if trader_setup:
+            trader_setup(trader)
         sig = parse_signal(SIGNAL)
         now = datetime.now(timezone.utc) + timedelta(minutes=1)
         await trader._execute(sig, now)
@@ -123,3 +129,54 @@ def test_daily_loss_limit_stops_sequence():
     deriv, trader, msgs = _run_sequence(losses=10, daily_loss_limit=3)
     assert deriv.stakes == [1.0, 2.2]
     assert "daily loss limit" in msgs[-1]
+
+
+def test_losing_sequence_limit():
+    def setup(t):
+        t.stats.lost_sequences = 2
+    deriv, trader, msgs = _run_sequence(losses=0, trader_setup=setup, max_losing_sequences=2)
+    assert deriv.stakes == []
+    assert "fully lost signals" in msgs[-1]
+
+
+def test_candle_outcomes_rise():
+    # 1-second ticks, price goes up for 300s, then down for 300s
+    ticks = [(t, 100 + t) for t in range(0, 301)] + [(t, 700 - t) for t in range(301, 610)]
+    assert candle_outcomes(ticks, 0, 300, "CALL", 4) == [True, False]   # no data for 3rd candle
+    assert candle_outcomes(ticks, 0, 300, "PUT", 2) == [False, True]
+
+
+def test_breakeven_and_sequence_profit():
+    assert round(breakeven(0.95), 3) == 0.513
+    assert sequence_profit([True], 0.95, 3, 2.2) == 0.95
+    assert round(sequence_profit([False, False, True], 0.95, 3, 2.2), 3) == round(4.84 * 0.95 - 3.2, 3)
+    assert round(sequence_profit([False] * 4, 0.95, 3, 2.2), 2) == -18.69
+    assert sequence_profit([False, True], 0.95, 0, 2.2) == -1
+
+
+def test_edge_and_simulation():
+    recs = [{"candles": [True], "payout": 0.95}] * 60 + [{"candles": [False, True], "payout": 0.95}] * 40
+    e = edge(recs, 0.95)
+    assert e.win_rate == 0.6 and e.low < e.breakeven      # 60/100 is not yet proof
+    assert "POSSIBLE EDGE" in e.verdict
+    strong = [{"candles": [True], "payout": 0.95}] * 140 + [{"candles": [False]}] * 60
+    assert "PROFITABLE" in edge(strong, 0.95).verdict    # 70% over 200 is
+    flat = simulate(recs, 0, 2.2, 0.95)
+    assert round(flat.profit, 2) == round(60 * 0.95 - 40, 2)
+    lo, hi = wilson_interval(30, 50)
+    assert lo < 0.6 < hi
+
+
+def test_edge_gate_blocks_until_proven(tmp_path):
+    journal = tmp_path / "j.jsonl"
+    trader = Trader(_cfg(edge_gate=True, edge_min_signals=50), FakeDeriv(0), None, journal=str(journal))
+    assert "collecting track record (0/50" in trader.edge_gate_reason()
+    import json
+    with open(journal, "w") as fh:
+        for i in range(100):
+            fh.write(json.dumps({"candles": [i % 2 == 0], "payout": 0.95}) + "\n")  # 50% win rate
+    assert "below" in trader.edge_gate_reason()
+    with open(journal, "w") as fh:
+        for i in range(100):
+            fh.write(json.dumps({"candles": [i % 5 != 0], "payout": 0.95}) + "\n")  # 80% win rate
+    assert trader.edge_gate_reason() is None
