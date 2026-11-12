@@ -283,7 +283,7 @@ class DerivClient:
                 "currency": currency,
                 "duration": duration,
                 "duration_unit": duration_unit,
-                "symbol": symbol,
+                "underlying_symbol": symbol,
             },
         })
         return resp["buy"]
@@ -296,22 +296,24 @@ class DerivClient:
             page_start = max(start, cursor - 5000 * granularity)
             resp = await self.request({"ticks_history": symbol, "style": "candles",
                                        "granularity": granularity, "start": page_start,
-                                       "end": cursor, "count": 5000, "adjust_start_time": 0}, timeout=60)
+                                       "end": cursor, "count": 5000}, timeout=60)
             page = resp.get("candles", [])
             if not page:
                 break
             for c in page:
-                out[int(c["epoch"])] = c
-            earliest = min(int(c["epoch"]) for c in page)
-            if earliest > page_start + 10 * granularity:
-                break   # history doesn't go back any further
-            cursor = page_start
+                c["epoch"] = int(_first(c, "epoch", "open_time", "time"))
+                out[c["epoch"]] = c
+            earliest = min(c["epoch"] for c in page)
+            if earliest >= cursor or (earliest > page_start and len(page) < 10):
+                break   # no older data
+            # if the server capped the page size, continue just before the earliest candle we got
+            cursor = earliest - granularity if earliest > page_start else page_start
         return [out[k] for k in sorted(out)]
 
     async def ticks_between(self, symbol: str, start: int, end: int) -> list[tuple[int, float]]:
         """Return (epoch, price) ticks with start <= epoch <= end."""
         resp = await self.request({"ticks_history": symbol, "start": start, "end": end,
-                                   "style": "ticks", "count": 5000, "adjust_start_time": 0})
+                                   "style": "ticks", "count": 5000})
         hist = resp["history"]
         return list(zip(hist["times"], map(float, hist["prices"])))
 
@@ -321,7 +323,7 @@ class DerivClient:
         resp = await self.request({
             "proposal": 1, "amount": 10, "basis": "stake", "contract_type": contract_type,
             "currency": currency, "duration": duration, "duration_unit": duration_unit,
-            "symbol": symbol,
+            "underlying_symbol": symbol,
         })
         return float(resp["proposal"]["payout"]) / 10 - 1
 

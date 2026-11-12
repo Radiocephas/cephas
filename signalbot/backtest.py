@@ -260,7 +260,10 @@ async def fetch(symbols: list[str], days: int, cache_dir: str) -> tuple[dict[str
         else:
             log.info("Downloading %s…", sym)
             candles = await deriv.candles(sym, start, end)
-            data[sym] = np.array([float(c["close"]) for c in candles])
+            if not candles:
+                log.warning("%s: no candles returned, skipping", sym)
+                continue
+            data[sym] = np.array([float(c.get("close", c.get("c"))) for c in candles])
             np.save(path, data[sym])
         log.info("%s: %d minutes of data", sym, len(data[sym]))
         try:
@@ -282,10 +285,10 @@ async def probe(symbol: str) -> None:
     requests = [
         {"active_symbols": "brief"},
         {"ticks_history": symbol, "style": "candles", "granularity": 60, "start": end - 300,
-         "end": end, "count": 3, "adjust_start_time": 0},
+         "end": end, "count": 3},
         {"ticks_history": symbol, "style": "ticks", "end": "latest", "count": 3},
         {"proposal": 1, "amount": 10, "basis": "stake", "contract_type": "CALL", "currency": "USD",
-         "duration": 5, "duration_unit": "m", "symbol": symbol},
+         "duration": 5, "duration_unit": "m", "underlying_symbol": symbol},
     ]
     for req in requests:
         print("\n>>>", json.dumps(req))

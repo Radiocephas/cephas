@@ -261,3 +261,19 @@ def test_client_matches_replies_with_and_without_req_id():
             return ticks
 
     assert asyncio.run(go()) == [(1, 1.5), (2, 2.5)]
+
+
+def test_candles_pagination_with_capped_pages():
+    from signalbot.deriv import DerivClient
+
+    class Capped(DerivClient):
+        async def request(self, payload, timeout=30, _retry=True):
+            assert "adjust_start_time" not in payload
+            lo, hi = max(payload["start"], 6000), payload["end"]   # data exists from t=6000
+            epochs = list(range(lo - lo % 60, hi + 1, 60))[-1000:]   # server caps at 1000
+            return {"candles": [{"epoch": e, "close": e / 60} for e in epochs if e >= lo]}
+
+    got = asyncio.run(Capped().candles("R_75", 0, 600_000))
+    epochs = [c["epoch"] for c in got]
+    assert epochs == sorted(set(epochs)) and epochs[0] == 6000 and epochs[-1] == 600_000
+    assert len(epochs) == (600_000 - 6000) // 60 + 1
