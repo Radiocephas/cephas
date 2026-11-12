@@ -68,6 +68,13 @@ class DerivError(Exception):
     pass
 
 
+def _first(d: dict, *keys):
+    for k in keys:
+        if d.get(k):
+            return d[k]
+    return None
+
+
 # reply msg_type -> request name, where they differ
 _REPLY_TYPES = {"history": "ticks_history", "candles": "ticks_history"}
 
@@ -245,10 +252,15 @@ class DerivClient:
             log.warning("Could not load active symbols, using static list: %s", exc)
             return
         for s in resp.get("active_symbols", []):
-            self.symbols[normalize_market(s["display_name"])] = s["symbol"]
+            sym = _first(s, "symbol", "underlying_symbol", "underlying", "code")
+            name = _first(s, "display_name", "underlying_symbol_name", "name", "display")
+            if sym and name:
+                self.symbols[normalize_market(name)] = sym
+            elif sym:
+                self.symbols[sym.lower()] = sym
 
     def resolve_symbol(self, market: str) -> str:
-        if market.upper() in self.symbols.values():   # already a symbol, e.g. "1HZ75V"
+        if market.upper() in self.symbols.values() or market.upper() in STATIC_SYMBOLS.values():   # already a symbol, e.g. "1HZ75V"
             return market.upper()
         key = normalize_market(market)
         if key in self.symbols:

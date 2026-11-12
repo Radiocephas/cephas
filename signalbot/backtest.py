@@ -273,6 +273,33 @@ async def fetch(symbols: list[str], days: int, cache_dir: str) -> tuple[dict[str
     return data, payouts
 
 
+async def probe(symbol: str) -> None:
+    """Print Deriv's raw replies so API format changes are easy to diagnose."""
+    deriv = DerivClient(None, os.getenv("DERIV_APP_ID") or None)
+    deriv._load_symbols = lambda: asyncio.sleep(0)   # don't parse anything, just connect
+    await deriv.connect()
+    end = int(time.time()) // 60 * 60
+    requests = [
+        {"active_symbols": "brief"},
+        {"ticks_history": symbol, "style": "candles", "granularity": 60, "start": end - 300,
+         "end": end, "count": 3, "adjust_start_time": 0},
+        {"ticks_history": symbol, "style": "ticks", "end": "latest", "count": 3},
+        {"proposal": 1, "amount": 10, "basis": "stake", "contract_type": "CALL", "currency": "USD",
+         "duration": 5, "duration_unit": "m", "symbol": symbol},
+    ]
+    for req in requests:
+        print("\n>>>", json.dumps(req))
+        try:
+            resp = await deriv.request(req, _retry=False, timeout=20)
+            for key in ("active_symbols",):
+                if isinstance(resp.get(key), list):
+                    resp[key] = resp[key][:2] + [f"... {len(resp[key])} total"]
+            print(json.dumps(resp, indent=1)[:1500])
+        except Exception as exc:
+            print("ERROR:", exc)
+    await deriv.close()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     ap = argparse.ArgumentParser()
@@ -280,7 +307,11 @@ def main() -> None:
     ap.add_argument("--symbols", nargs="*", default=DEFAULT_SYMBOLS)
     ap.add_argument("--cache", default="backtest_data")
     ap.add_argument("--out", default="backtest_report.md")
+    ap.add_argument("--probe", action="store_true", help="print Deriv's raw replies and exit")
     args = ap.parse_args()
+    if args.probe:
+        asyncio.run(probe(args.symbols[0] if args.symbols != DEFAULT_SYMBOLS else "R_75"))
+        return
 
     data, payouts = asyncio.run(fetch(args.symbols, args.days, args.cache))
     strategies = build_strategies()
