@@ -29,6 +29,13 @@ STATIC_SYMBOLS = {
     "volatility 100 (1s) index": "1HZ100V",
     "volatility 150 (1s) index": "1HZ150V",
     "volatility 250 (1s) index": "1HZ250V",
+    "jump 10 index": "JD10",
+    "jump 25 index": "JD25",
+    "jump 50 index": "JD50",
+    "jump 75 index": "JD75",
+    "jump 100 index": "JD100",
+    "bear market index": "RDBEAR",
+    "bull market index": "RDBULL",
 }
 
 

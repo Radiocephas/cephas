@@ -43,6 +43,23 @@ def test_market_resolution():
     assert STATIC_SYMBOLS[normalize_market("Volatility 75 (1s) Index")] == "1HZ75V"
     assert STATIC_SYMBOLS[normalize_market("volatility 75 ( 1s )")] == "1HZ75V"
     assert STATIC_SYMBOLS[normalize_market("Volatility 100 Index")] == "R_100"
+    assert STATIC_SYMBOLS[normalize_market("Jump 50 Index")] == "JD50"
+    assert STATIC_SYMBOLS[normalize_market("Bear Market Index")] == "RDBEAR"
+
+
+def test_group_messages_with_forward_headers():
+    msg = """ https://t.me/atwsignals/9201 ATW Signals (Free), [Nov 12, 2026 at 14:56]
+✅ Entry confirmed ✅
+🌎 Market: Jump 75 Index
+⏳ Duration: 5min
+📊 Direction: 🔴 FALL
+⏰ Entry Time (UTC): 12:30
+👉 On loss, use martingale on the next candle, max 3 times"""
+    s = parse_signal(msg)
+    assert (s.market, s.contract_type, s.entry_hour, s.entry_minute) == ("Jump 75 Index", "PUT", 12, 30)
+    for other in ("GAIN Martingale 1 ✅", "LOSS 😔", "End of trading session",
+                  "📊 Session Report Session 2\n\n16:50 Jump 50 Index ❌\n✅ Wins: 19"):
+        assert parse_signal(other) is None
 
 
 def test_entry_datetime_midnight_rollover():
